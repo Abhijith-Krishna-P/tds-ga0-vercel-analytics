@@ -1,15 +1,10 @@
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 import math
 
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["POST", "OPTIONS"],
-    allow_headers=["*"],
-)
 
+# Sample telemetry data supplied with the assignment.
 TELEMETRY = [
     {
         "region": "apac",
@@ -266,52 +261,86 @@ TELEMETRY = [
 ]
 
 
+# Add CORS headers to every response, including errors and preflight responses.
+@app.middleware("http")
+async def cors_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        response = Response(status_code=204)
+    else:
+        response = await call_next(request)
+
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
+
 def percentile(values, p):
+    """Calculate a linearly interpolated percentile."""
     values = sorted(values)
     if not values:
         return 0.0
     if len(values) == 1:
         return float(values[0])
+
     position = (len(values) - 1) * p
     lower = math.floor(position)
     upper = math.ceil(position)
+
     if lower == upper:
         return float(values[lower])
-    weight = position - lower
-    return float(values[lower] * (1 - weight) + values[upper] * weight)
+
+    fraction = position - lower
+    return float(values[lower] * (1 - fraction) + values[upper] * fraction)
 
 
 def calculate_metrics(region, threshold_ms):
-    rows = [r for r in TELEMETRY if r["region"].lower() == region.lower()]
+    rows = [
+        row for row in TELEMETRY
+        if row["region"].lower() == str(region).lower()
+    ]
+
     if not rows:
         return None
-    latencies = [float(r["latency_ms"]) for r in rows]
-    uptimes = [float(r["uptime_pct"]) for r in rows]
+
+    latencies = [float(row["latency_ms"]) for row in rows]
+    uptimes = [float(row["uptime_pct"]) for row in rows]
+
     return {
         "avg_latency": round(sum(latencies) / len(latencies), 4),
         "p95_latency": round(percentile(latencies, 0.95), 4),
         "avg_uptime": round(sum(uptimes) / len(uptimes), 4),
-        "breaches": sum(1 for value in latencies if value > threshold_ms),
+        "breaches": sum(1 for latency in latencies if latency > threshold_ms),
     }
 
 
-async def handle_analytics(request: Request):
-    body = await request.json()
+async def analytics_response(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"error": "Request body must be valid JSON"},
+            status_code=400,
+        )
+
     regions = body.get("regions", [])
     threshold_ms = float(body.get("threshold_ms", 180))
-    result = {}
+
+    results = {}
     for region in regions:
-        metrics = calculate_metrics(str(region), threshold_ms)
+        metrics = calculate_metrics(region, threshold_ms)
         if metrics is not None:
-            result[str(region).lower()] = metrics
-    return result
+            results[str(region).lower()] = metrics
+
+    return results
 
 
 @app.post("/")
 async def analytics_root(request: Request):
-    return await handle_analytics(request)
+    return await analytics_response(request)
 
 
 @app.post("/{path:path}")
 async def analytics_any_path(path: str, request: Request):
-    return await handle_analytics(request)
+    # Accept POST requests at the endpoint path used by the evaluator.
+    return await analytics_response(request)
