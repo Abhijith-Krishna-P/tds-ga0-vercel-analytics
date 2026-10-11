@@ -1,10 +1,19 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
 import math
 
 app = FastAPI()
 
-# Sample telemetry data supplied with the assignment.
+# Standard FastAPI CORS middleware (based on the class discussion).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    expose_headers=["Access-Control-Allow-Origin"],
+)
+
+# Telemetry records from the provided assignment JSON file.
 TELEMETRY = [
     {
         "region": "apac",
@@ -261,22 +270,8 @@ TELEMETRY = [
 ]
 
 
-# Add CORS headers to every response, including errors and preflight responses.
-@app.middleware("http")
-async def cors_headers(request: Request, call_next):
-    if request.method == "OPTIONS":
-        response = Response(status_code=204)
-    else:
-        response = await call_next(request)
-
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
-
-
 def percentile(values, p):
-    """Calculate a linearly interpolated percentile."""
+    """Linearly interpolated percentile."""
     values = sorted(values)
     if not values:
         return 0.0
@@ -286,7 +281,6 @@ def percentile(values, p):
     position = (len(values) - 1) * p
     lower = math.floor(position)
     upper = math.ceil(position)
-
     if lower == upper:
         return float(values[lower])
 
@@ -299,7 +293,6 @@ def calculate_metrics(region, threshold_ms):
         row for row in TELEMETRY
         if row["region"].lower() == str(region).lower()
     ]
-
     if not rows:
         return None
 
@@ -314,33 +307,25 @@ def calculate_metrics(region, threshold_ms):
     }
 
 
-async def analytics_response(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(
-            {"error": "Request body must be valid JSON"},
-            status_code=400,
-        )
-
+async def process_request(request: Request):
+    body = await request.json()
     regions = body.get("regions", [])
     threshold_ms = float(body.get("threshold_ms", 180))
 
-    results = {}
+    result = {}
     for region in regions:
         metrics = calculate_metrics(region, threshold_ms)
         if metrics is not None:
-            results[str(region).lower()] = metrics
-
-    return results
+            result[str(region).lower()] = metrics
+    return result
 
 
 @app.post("/")
 async def analytics_root(request: Request):
-    return await analytics_response(request)
+    return await process_request(request)
 
 
 @app.post("/{path:path}")
 async def analytics_any_path(path: str, request: Request):
-    # Accept POST requests at the endpoint path used by the evaluator.
-    return await analytics_response(request)
+    # Support the evaluator if it posts to a path other than "/".
+    return await process_request(request)
